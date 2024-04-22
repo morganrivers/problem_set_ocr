@@ -1,7 +1,7 @@
 This codebase is for uploading psets using gpt4 vision.
 
 Requirements:
- - GPT4 api key
+ - GPT4 api key. For me, in adddition to the $20 a month gpt4 charge, gpt4 vision is about $0.01 per query, so the cost will be much less than a dollar per pset.
  - `pdflatex` installed
  - `acroread` installed (optional, but it's nice for viewing the latex when they are generated)
 
