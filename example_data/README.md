@@ -1,0 +1,1 @@
+be sure to add your gpt4 api key in the json file
