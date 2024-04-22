@@ -12,6 +12,8 @@ Usage:
 
 2. Get a bunch of images of your pset and download them to a folder within `psets/` subfolder
 
+3. Note: to get out of a compile error and have gpt4 try again to generate valid latex, just enter "x" and that exits pdflatex in a civilized way.
+
 Also! Useful command (unrelated to codebase):
 ```
 python -c "import subprocess; subprocess.run(['pdflatex', 'output.tex'], check=True)"
