@@ -10,6 +10,9 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import re
 
+JUST_USE_DUMMY_DATA = False
+SHOW_COMPILED_PDF = True
+SHOW_PAGE_IMAGE = True
 
 JSON_PARAMETERS_LOCATION = "../data/params.json"
 
@@ -53,6 +56,8 @@ def get_response(api_key, latex_preamble, base64_image):
         "max_tokens": 1024,
     }
     print("posting image to openai api...")
+    if JUST_USE_DUMMY_DATA:
+        return True, latex_preamble
     response = requests.post(
         "https://api.openai.com/v1/chat/completions", headers=headers, json=payload
     )
@@ -71,9 +76,14 @@ def get_response(api_key, latex_preamble, base64_image):
 # Function to save the LaTeX response as a .tex file
 def save_response_as_tex(response_data, latex_preamble, tex_filename):
     if response_data:
-        continued_latex = response_data["choices"][0]["message"]["content"]
+        if JUST_USE_DUMMY_DATA:
+            continued_latex = "\\section{Lorem ipsum dolor!}\n\\end{document}"
+        else:
+            continued_latex = response_data["choices"][0]["message"]["content"]
+        print("")
         print("continued_latex")
         print(continued_latex)
+        print("")
         section_start = continued_latex.find("\\section")
         end_document = continued_latex.find("\\end{document}")
         if section_start != -1 and end_document != -1:
@@ -103,19 +113,48 @@ def compile_latex(tex_file):
         return False
 
 
-def get_latex_preamble(page_number):
-    latex_preamble = (
-        "\\documentclass{article}\n"
-        "\\usepackage{fancyhdr}\n"
-        "\\usepackage{amsmath}\n"
-        "\\usepackage{amssymb}\n"
-        "\\pagestyle{fancy}\n"
-        "\\fancyhf{}\n"
-        "\\fancyhead[R]{\\thepage}\n"
-        "\\renewcommand{\\headrulewidth}{0pt}\n"
-        "\\begin{document}\n"
-        "\\setcounter{page}{" + str(page_number) + "}\n\n"
-    )
+def get_latex_preamble(page_number, homework_number):
+    """
+    CAUTION: used for both giving the llm the start of the given page, and the first page is actually used as the start
+    of the document!
+    """
+    assert page_number >= 1, f"oops, page number starts at 1, but we got {page_number}"
+    if page_number == 1:
+        latex_preamble = (
+            "\\documentclass[fleqn]{article}\n"
+            "\\usepackage{fancyhdr}\n"
+            "\\usepackage{amsmath}\n"
+            "\\usepackage{amssymb}\n"
+            "\\pagestyle{fancy}\n"
+            "\\fancyhf{}\n"
+            "\\fancypagestyle{firstpage}{\\fancyhf{}\\fancyhead[R]{\\textbf{Homework "
+            + str(homework_number)
+            + " \\\\ Morgan Rivers \\\\ Thermodynamics and Statistical Mechanics \\\\ \\today}}}\n"
+            "\\fancyhead[R]{\\thepage}\n"
+            "\\renewcommand{\\headrulewidth}{0pt}\n"
+            "\\usepackage{enumitem}\n"
+            "\\setlist[enumerate]{align=left, labelwidth=*, itemindent=1em, leftmargin=*}\n"
+            "\\begin{document}\n"
+            "\\thispagestyle{firstpage}\\vspace*{10pt}\\section*{Homework "
+            + str(homework_number)
+            + "}\\vspace*{10pt}\\subsection*{Exercise 1}\n\n"
+        )
+    else:
+        latex_preamble = (
+            "\\documentclass[fleqn]{article}\n"
+            "\\usepackage{fancyhdr}\n"
+            "\\usepackage{amsmath}\n"
+            "\\usepackage{amssymb}\n"
+            "\\pagestyle{fancy}\n"
+            "\\fancyhf{}\n"
+            "\\fancyhead[R]{\\thepage}\n"
+            "\\renewcommand{\\headrulewidth}{0pt}\n"
+            "\\usepackage{enumitem}\n"
+            "\\setlist[enumerate]{align=left, labelwidth=*, itemindent=1em, leftmargin=*}\n"
+            "\\begin{document}\n"
+            "\\setcounter{page}{" + str(page_number) + "}\n\n"
+        )
+
     return latex_preamble
 
 
@@ -150,40 +189,101 @@ def display_and_choose_subfolder(subfolders):
             print("Invalid input. Please enter a number.")
 
 
+def modify_filename(filename):
+    # Regex to find '_###.' right before the extension
+    pattern = r"_(\d{3})\."
+
+    # Check if the filename matches the pattern
+    if re.search(pattern, filename):
+        # If the filename already has '_###.', return it unchanged
+        return filename
+    else:
+        # If not, add '_000' before the extension
+        return re.sub(r"\.", "_000.", filename)
+
+
 def sort_image_files(folder):
-    """Sort image files by date and time extracted from their filenames."""
+    """
+    Sort image files by date and time extracted from their filenames,
+    with secondary sorting by optional sequence number.
+    """
     image_files = os.listdir(folder)
-    pattern = re.compile(r"^signal-\d{4}-\d{2}-\d{2}-\d{4}")
+    pattern = re.compile(r"^signal-\d{4}-\d{2}-\d{2}-(\d{6})(?:_(\d{3}))?\.jpe?g$")
 
     # Filter files to ensure they match the expected naming convention
-    valid_files = [
-        file
-        for file in image_files
-        if pattern.match(file) and file.lower().endswith((".jpg", ".jpeg", ".png"))
-    ]
+    valid_files = [file for file in image_files if pattern.match(file)]
 
-    # Sort files based on the sequence number in the filename
-    valid_files.sort(key=lambda name: int(name.split("_")[1].split(".")[0]))
+    # Extract and sort files based on the six-digit time and optional sequence number
+    valid_files.sort(
+        key=lambda name: (
+            int(pattern.search(name).group(1)),  # Time part as integer
+            int(pattern.search(name).group(2))
+            if pattern.search(name).group(2)
+            else 0,  # Sequence number or 0 if absent
+        )
+    )
 
     return valid_files
 
 
-def process_images(selected_folder, openai_api_key):
+def sort_files_by_date_sequence(folder, file_extension, pattern_string):
+    """
+    Generalized function to sort files by date and time extracted from their filenames,
+    with secondary sorting by optional sequence number.
+    """
+    image_files = os.listdir(folder)
+    pattern = re.compile(pattern_string)
+
+    # Filter files to ensure they match the expected naming convention
+    valid_files = [
+        file for file in image_files if file.lower().endswith(file_extension)
+    ]
+
+    # Prepare sorting keys
+    new_matches = []
+    actually_valid_files = []
+    for name in valid_files:
+        match = pattern.search(name)
+        if match is not None:
+            actually_valid_files.append(name)
+            new_file = modify_filename(name)
+            new_match = pattern.search(new_file)
+            new_matches.append(new_match)
+    # Extract and sort files based on the six-digit time and optional sequence number
+    actually_valid_files.sort(
+        key=lambda name: (
+            int(pattern.search(name).group(1)),  # Time part as integer
+            int(pattern.search(name).group(2))
+            if pattern.search(name).group(2)
+            else 0,  # Sequence number or 0 if absent
+        )
+    )
+
+    return actually_valid_files
+
+
+def process_images(selected_folder, openai_api_key, homework_number):
     """Process each image file within the selected folder."""
-    image_files = sort_image_files(PSET_FOLDER / selected_folder)
+    pattern = re.compile(r"^signal-\d{4}-\d{2}-\d{2}-(\d{6})(?:_(\d{3}))?\.jpe?g$")
+    image_files = sort_files_by_date_sequence(
+        PSET_FOLDER / selected_folder, ".jpeg", pattern
+    )
+    print("")
     print("image_files")
     print(image_files)
+    print("")
 
     for idx, image_name in enumerate(image_files):
         if image_name.lower().endswith((".jpg", ".jpeg", ".png")):
             page_number = idx + 1
             image_path = PSET_FOLDER / selected_folder / Path(image_name)
-            display_image(image_path)
+            if SHOW_PAGE_IMAGE:
+                display_image(image_path)
             if input("process this image? (y/n)\n") == "y":
                 base64_image = encode_image(image_path)
                 while True:
                     # input(f"\nPress enter to send image {page_number} to openai api...\n")
-                    latex_preamble = get_latex_preamble(page_number)
+                    latex_preamble = get_latex_preamble(page_number, homework_number)
                     response_data, latex_preamble = get_response(
                         openai_api_key, latex_preamble, base64_image
                     )
@@ -225,22 +325,17 @@ def handle_response(
     """Handle the server response for each image."""
     if response_data:
         tex_filename = f"output_{os.path.splitext(image_name)[0]}"
-        print("tex_filename")
-        print(tex_filename)
         tex_path = RESULTS_FOLDER / selected_folder / (tex_filename + ".tex")
-        print("tex_path")
-        print(tex_path)
         pdf_path = RESULTS_FOLDER / selected_folder / (tex_filename + ".pdf")
-        print("pdf_path")
-        print(pdf_path)
         next_action = save_response_as_tex(response_data, latex_preamble, tex_path)
         if next_action == "success":
             if compile_latex(tex_path):
                 print(
                     f"\nCompiled the LaTeX for written page number {page_number}. Continuing.\n"
                 )
-                if not view_latex_pdf(pdf_path):
-                    print("issue showing the pdf... continuing anyway")
+                if SHOW_COMPILED_PDF:
+                    if not view_latex_pdf(pdf_path):
+                        print("issue showing the pdf... continuing anyway")
                 return "continue"
             else:
                 print("Error compiling LaTeX. Trying api callagain.")
@@ -253,61 +348,52 @@ def handle_response(
         return "try_again"
 
 
-def consolidate_tex_files_sorted(results_folder):
-    # This is the final preamble and end document to be used in the consolidated file
-    preamble = (
-        "\\documentclass{article}\n"
-        "\\usepackage{fancyhdr}\n"
-        "\\usepackage{amsmath}\n"
-        "\\usepackage{amssymb}\n"
-        "\\pagestyle{fancy}\n"
-        "\\fancyhf{}\n"
-        "\\fancyhead[R]{\\thepage}\n"
-        "\\renewcommand{\\headrulewidth}{0pt}\n"
-        "\\begin{document}\n"
-    )
+def consolidate_tex_files_sorted(results_folder, homework_number):
     end_document = "\\end{document}"
-
-    # Initialize a variable to hold the concatenated content
     consolidated_content = ""
 
-    # List and sort all the .tex files in the results folder based on the sequence number
-    tex_files = list(results_folder.glob("*signal*.tex"))
-    # Assume filenames are like 'signal-YYYY-MM-DD_1234.tex', sort by the integer after the underscore
-    print("tex_files")
-    print(tex_files)
-    tex_files.sort(key=lambda name: int(Path(name).stem.split("_")[-1]))
+    # Define the pattern for `.tex` files
+    pattern = re.compile(r"^output_signal-\d{4}-\d{2}-\d{2}-(\d{6})(?:_(\d{3}))?\.tex$")
 
-    # tex_files.sort(key=lambda f: int(re.search(r"_(\d+)", f.stem).group(1)))
+    tex_files = sort_files_by_date_sequence(results_folder, ".tex", pattern)
 
-    # Loop through the sorted .tex files
+    actual_latex_preamble = get_latex_preamble(
+        page_number=1, homework_number=homework_number
+    )
+    latex_preamble_search_strings_to_remove = [
+        "\\documentclass[fleqn]{article}",
+        "\\usepackage{fancyhdr}",
+        "\\usepackage{amsmath}",
+        "\\usepackage{amssymb}",
+        "\\pagestyle{fancy}",
+        "\\fancyhf{}",
+        "\\fancypagestyle{firstpage}{\\fancyhf{}\\fancyhead[R]{\\textbf{",
+        "\\fancyhead[R]{\\thepage}",
+        "\\renewcommand{\\headrulewidth}{0pt}",
+        "\\usepackage{enumitem}",
+        "\\setlist[enumerate]{align=left, labelwidth=*, itemindent=1em, leftmargin=*}",
+        "\\begin{document}",
+        "\\thispagestyle{firstpage}\\vspace*{10pt}\\section*{",
+        "\\setcounter{page}{",
+        "\\end{document}",
+    ]
     for tex_file in tex_files:
-        with open(tex_file, "r") as file:
+        with open(results_folder / tex_file, "r") as file:
             lines = file.readlines()
 
-        # Filter out the unwanted lines
         filtered_content = ""
         for line in lines:
-            if (
-                line.strip().startswith("\\documentclass")
-                or line.strip().startswith("\\usepackage")
-                or line.strip().startswith("\\pagestyle")
-                or line.strip().startswith("\\fancy")
-                or line.strip().startswith("\\renewcommand")
-                or line.strip().startswith("\\setcounter{page")
-                or line.strip() == "\\begin{document}"
-                or line.strip() == "\\end{document}"
+            if not any(
+                line.strip().startswith(preamble)
+                for preamble in latex_preamble_search_strings_to_remove
             ):
-                continue
-            filtered_content += line
+                filtered_content += line
 
-        # Add the filtered content to the consolidated content
         consolidated_content += filtered_content + "\n"
 
-    # Create the final .tex file with the complete content
     final_tex_path = results_folder / "consolidated_output.tex"
     with open(final_tex_path, "w") as file:
-        file.write(preamble + consolidated_content + end_document)
+        file.write(actual_latex_preamble + consolidated_content + end_document)
 
     print(f"Consolidated file created at: {final_tex_path}")
     print("compiling...")
@@ -322,14 +408,15 @@ def main():
     params = load_parameters()
     openai_api_key = params["openai_api_key"]
 
+    homework_number = int(input("Enter homework number as an integer: "))
     subfolders = list_subfolders(PSET_FOLDER)
     selected_folder = display_and_choose_subfolder(subfolders)
     print("selected_folder")
     print(selected_folder)
     (RESULTS_FOLDER / selected_folder).mkdir(parents=True, exist_ok=True)
-    process_images(selected_folder, openai_api_key)
+    process_images(selected_folder, openai_api_key, homework_number)
 
-    consolidate_tex_files_sorted(RESULTS_FOLDER / selected_folder)
+    consolidate_tex_files_sorted(RESULTS_FOLDER / selected_folder, homework_number)
 
 
 if __name__ == "__main__":
