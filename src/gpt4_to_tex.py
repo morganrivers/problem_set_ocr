@@ -9,10 +9,13 @@ import matplotlib
 import matplotlib.pyplot as plt
 from pathlib import Path
 import re
+import io
 
 JUST_USE_DUMMY_DATA = False
 SHOW_COMPILED_PDF = True
 SHOW_PAGE_IMAGE = True
+PROCESS_BOTH_HALVES_THEN_PROCESS_WHOLE_PAGE = True
+PRINT_TEXT_PROMPT = True
 
 JSON_PARAMETERS_LOCATION = "../data/params.json"
 
@@ -27,8 +30,52 @@ def encode_image(image_path):
         return base64.b64encode(image_file.read()).decode("utf-8")
 
 
+def encode_image_portion(image_path, start_pct, end_pct):
+    # Open the image
+    with Image.open(image_path) as img:
+        width, height = img.size
+        # Calculate the crop area
+        start_height = int(height * start_pct)
+        end_height = int(height * end_pct)
+        # Crop the image vertically
+        img_cropped = img.crop((0, start_height, width, end_height))
+
+        # Save the cropped image to a bytes buffer
+        buffer = io.BytesIO()
+        img_cropped.save(
+            buffer, format="JPEG"
+        )  # You can change the format to match your specific needs
+
+        # Encode to base64
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def encode_image_first_60pct(image_path):
+    return encode_image_portion(image_path, 0, 0.6)
+
+
+def encode_image_last_60pct(image_path):
+    return encode_image_portion(image_path, 0.4, 1.0)
+
+
 # Function to get the response from OpenAI API
-def get_response(api_key, latex_preamble, base64_image):
+def get_response(
+    api_key,
+    latex_preamble,
+    base64_image,
+    prompt_type,
+    additional_context_before_latex_preamble="",
+):
+    if prompt_type == "single_image":
+        system_prompt = "Provide LaTeX completion which reproduces what is shown on the image in latex. Start your response with \\section and ending with \\end{document}. Be sure to use \\hbox to box answers that are boxed in the image. Do not converse with a nonexistent user. Do not offer corrections, only recreate what is written. Remember: you must start your response with \\section"
+    elif prompt_type == "piece_of_image":
+        system_prompt = "Provide LaTeX completion which reproduces what is shown on the image in latex. Start your response with \\section and ending with \\end{document}. Be sure to use \\hbox to box answers that are boxed in the image. Do not converse with a nonexistent user. Do not offer corrections, only recreate what is written. Do not render equations which are cut off at the top or bottom of the image. Remember: you must start your response with \\section"
+    elif prompt_type == "combined_image":
+        system_prompt = "Provide LaTeX completion which reproduces what is shown on the image in latex. Use provided context to improve the accuracy of your completion. Start your response with \\section and ending with \\end{document}. Be sure to use \\hbox to box answers that are boxed in the image. Do not converse with a nonexistent user. Do not offer corrections, only recreate what is written. Remember: you must start your response with \\section"
+    else:
+        print("ERROR: prompt type not allowed")
+        quit()
+
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     payload = {
         "model": "gpt-4-turbo",
@@ -38,11 +85,20 @@ def get_response(api_key, latex_preamble, base64_image):
                 "content": [
                     {
                         "type": "text",
-                        "text": "Provide LaTeX completion which reproduces what is shown on the image in latex. Start your response with \\section and ending with \\end{document}. Be sure to use \\hbox to box final answers. Do not converse with a nonexistent user. Do not offer corrections, only recreate what is written.",
+                        "text": system_prompt,
                     }
                 ],
             },
-            {"role": "user", "content": [{"type": "text", "text": latex_preamble}]},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": additional_context_before_latex_preamble
+                        + latex_preamble,
+                    }
+                ],
+            },
             {
                 "role": "user",
                 "content": [
@@ -55,6 +111,13 @@ def get_response(api_key, latex_preamble, base64_image):
         ],
         "max_tokens": 1024,
     }
+
+    if PRINT_TEXT_PROMPT:
+        print("")
+        print("")
+        print(f"SYSTEM:\n{system_prompt}\n\n")
+        print(f"USER:\n{additional_context_before_latex_preamble}{latex_preamble}")
+
     print("posting image to openai api...")
     if JUST_USE_DUMMY_DATA:
         return True, latex_preamble
@@ -73,24 +136,33 @@ def get_response(api_key, latex_preamble, base64_image):
     return None, None
 
 
+def get_continuation_text(response_data):
+    if JUST_USE_DUMMY_DATA:
+        continued_latex = "\\section{Lorem ipsum dolor!}\n\\end{document}"
+    else:
+        continued_latex = response_data["choices"][0]["message"]["content"]
+    section_start = continued_latex.find("\\section")
+    end_document = continued_latex.find("\\end{document}")
+
+    if section_start != -1 and end_document != -1:
+        relevant_text = continued_latex[
+            section_start : end_document + len("\\end{document}")
+        ]
+        return relevant_text
+    else:
+        return None
+
+
 # Function to save the LaTeX response as a .tex file
 def save_response_as_tex(response_data, latex_preamble, tex_filename):
     if response_data:
-        if JUST_USE_DUMMY_DATA:
-            continued_latex = "\\section{Lorem ipsum dolor!}\n\\end{document}"
-        else:
-            continued_latex = response_data["choices"][0]["message"]["content"]
+        continuation = get_continuation_text(response_data)
         print("")
         print("continued_latex")
-        print(continued_latex)
+        print(continuation)
         print("")
-        section_start = continued_latex.find("\\section")
-        end_document = continued_latex.find("\\end{document}")
-        if section_start != -1 and end_document != -1:
-            relevant_text = continued_latex[
-                section_start : end_document + len("\\end{document}")
-            ]
-            final_text = latex_preamble + relevant_text
+        if continuation is not None:
+            final_text = latex_preamble + continuation
             print("opening at path")
             print(tex_filename)
             with open(tex_filename, "w") as tex_file:
@@ -262,6 +334,81 @@ def sort_files_by_date_sequence(folder, file_extension, pattern_string):
     return actually_valid_files
 
 
+def process_single_image(
+    page_number,
+    image_name,
+    base64_image,
+    latex_preamble,
+    openai_api_key,
+    selected_folder,
+    prompt_type="single_image",
+    additional_context_before_latex_preamble="",
+):
+    """Process a single image, managing API interaction and response handling."""
+    while True:
+        response_data, latex_preamble = get_response(
+            openai_api_key,
+            latex_preamble,
+            base64_image,
+            prompt_type,
+            additional_context_before_latex_preamble,
+        )
+        next_action = handle_response(
+            response_data,
+            image_name,
+            page_number,
+            latex_preamble,
+            selected_folder,
+            prompt_type,
+        )
+        if next_action == "continue":
+            return get_continuation_text(response_data)  # Image processed successfully
+        elif next_action == "repeat":
+            continue  # Repeat processing for this image
+
+
+def process_image_in_pieces(
+    page_number, image_name, image_path, latex_preamble, openai_api_key, selected_folder
+):
+    """Process a image, managing API interaction and response handling."""
+    base64_image_first = encode_image_first_60pct(image_path)
+    response_first = process_single_image(
+        page_number,
+        "first_part_" + image_name,
+        base64_image_first,
+        latex_preamble,
+        openai_api_key,
+        selected_folder,
+        prompt_type="piece_of_image",
+    )
+    base64_image_last = encode_image_last_60pct(image_path)
+    response_second = process_single_image(
+        1 if page_number == 0 else page_number,
+        "second_part_" + image_name,
+        base64_image_first,
+        latex_preamble,
+        openai_api_key,
+        selected_folder,
+        prompt_type="piece_of_image",
+    )
+    base64_image = encode_image(image_path)
+    additional_context_before_latex_preamble = (
+        "Attempt at LaTex of first half of document:\n" + response_first + "\n\n"
+        "Attempt at LaTex of second half of document:\n" + response_second + "\n\n"
+        "The latex of the entire page:\n"
+    )
+    process_single_image(
+        page_number,
+        image_name,
+        base64_image,
+        latex_preamble,
+        openai_api_key,
+        selected_folder,
+        prompt_type="combined_image",
+        additional_context_before_latex_preamble=additional_context_before_latex_preamble,
+    )
+
+
 def process_images(selected_folder, openai_api_key, homework_number):
     """Process each image file within the selected folder."""
     pattern = re.compile(r"^signal-\d{4}-\d{2}-\d{2}-(\d{6})(?:_(\d{3}))?\.jpe?g$")
@@ -269,37 +416,57 @@ def process_images(selected_folder, openai_api_key, homework_number):
         PSET_FOLDER / selected_folder, ".jpeg", pattern
     )
     print("")
-    print("image_files")
+    print("image_files!")
     print(image_files)
     print("")
-
     for idx, image_name in enumerate(image_files):
         if image_name.lower().endswith((".jpg", ".jpeg", ".png")):
             page_number = idx + 1
             image_path = PSET_FOLDER / selected_folder / Path(image_name)
             if SHOW_PAGE_IMAGE:
                 display_image(image_path)
-            if input("process this image? (y/n)\n") == "y":
-                base64_image = encode_image(image_path)
-                while True:
-                    # input(f"\nPress enter to send image {page_number} to openai api...\n")
-                    latex_preamble = get_latex_preamble(page_number, homework_number)
-                    response_data, latex_preamble = get_response(
-                        openai_api_key, latex_preamble, base64_image
-                    )
-                    next_action = handle_response(
-                        response_data,
-                        image_name,
-                        page_number,
-                        latex_preamble,
-                        selected_folder,
-                    )
-                    if next_action == "continue":
-                        break  # it seemed to work
-                    elif next_action == "repeat":
-                        continue  # try again
+            choice = input(
+                "process this image? All at once, in pieces (for longer pages), (a/p/n)\n"
+            )
+            if not (choice == "y" or choice == "a" or choice == "p"):
+                print("Skipping image processing.")
+                continue  # Exit the while loop if not processing the image
             else:
-                print("skipping image processing.")
+                continue_processing = True
+                while continue_processing:
+                    latex_preamble = get_latex_preamble(page_number, homework_number)
+                    if choice=="a":
+                        print("Processing all at once.")
+                        process_image_in_pieces(
+                            page_number,
+                            image_name,
+                            image_path,
+                            latex_preamble,
+                            openai_api_key,
+                            selected_folder,
+                        )
+                    elif choice="p":
+                        print("processing piece by piece.")
+                        base64_image = encode_image(image_path)
+                        process_single_image(
+                            page_number,
+                            image_name,
+                            base64_image,
+                            latex_preamble,
+                            openai_api_key,
+                            selected_folder,
+                        )
+                    # Ask if user is satisfied or wants to process again
+                    if (
+                        input(
+                            "Are you satisfied with the pdf result? Otherwise, will resubmit. (y/n): "
+                        ).lower()
+                        != "y"
+                    ):
+                        print("Rerunning API call for OCR.")
+                        continue_processing = True
+                    else:
+                        continue_processing = False
 
 
 def display_image(image_path):
@@ -320,7 +487,7 @@ def view_latex_pdf(pdf_path):
 
 
 def handle_response(
-    response_data, image_name, page_number, latex_preamble, selected_folder
+    response_data, image_name, page_number, latex_preamble, selected_folder, prompt_type
 ):
     """Handle the server response for each image."""
     if response_data:
@@ -333,12 +500,14 @@ def handle_response(
                 print(
                     f"\nCompiled the LaTeX for written page number {page_number}. Continuing.\n"
                 )
-                if SHOW_COMPILED_PDF:
+                if SHOW_COMPILED_PDF and (
+                    prompt_type == "single_image" or prompt_type == "combined_image"
+                ):
                     if not view_latex_pdf(pdf_path):
                         print("issue showing the pdf... continuing anyway")
                 return "continue"
             else:
-                print("Error compiling LaTeX. Trying api callagain.")
+                print("Error compiling LaTeX. Trying api call again.")
                 return "try_again"
         else:
             print("Error saving response as LaTeX. Trying api call again.")
